@@ -1,0 +1,173 @@
+GAME MANAGER — SETUP GUIDE
+============================
+
+WHAT YOU NEED
+=============
+1. Proxmox server with SMB share
+2. Gaming laptop (Windows) with the share mapped
+3. This PowerShell script
+
+STEP-BY-STEP SETUP
+===================
+
+--- ON PROXMOX SERVER ---
+
+1. SSH into your Proxmox host (or a container/VM on it)
+
+2. Install Samba:
+   apt update && apt install samba -y
+
+3. Create game storage directory:
+   mkdir -p /tank/games
+   chmod 777 /tank/games
+
+4. Create Samba config:
+   cat >> /etc/samba/smb.conf << 'EOF'
+
+[games]
+   path = /tank/games
+   browseable = yes
+   writable = yes
+   guest ok = no
+   valid users = youruser
+   force user = youruser
+   create mask = 0644
+   directory mask = 0755
+EOF
+
+5. Create a Samba user:
+   adduser --no-create-home --disabled-password --gecos "" youruser
+   smbpasswd -a youruser
+   (set a password you'll remember)
+
+6. Restart Samba:
+   systemctl restart smbd
+   systemctl enable smbd
+
+7. Test from Proxmox:
+   smbclient //localhost/games -U youruser
+   (should connect without errors)
+
+8. Organize your games on the server:
+   mkdir -p /tank/games/{steam,epic,pirated}
+   # Copy/move your game folders into the right place
+
+--- ON WINDOWS LAPTOP ---
+
+1. Map the SMB share to a drive:
+   
+   Method A (Explorer):
+   - Open File Explorer
+   - Right-click "This PC" > "Map network drive"
+   - Drive: Z:
+   - Folder: \\PROXMOX_IP\games
+   - Check "Reconnect at sign-in"
+   - Enter credentials (youruser / password)
+   
+   Method B (PowerShell - run as Admin):
+   net use Z: \\PROXMOX_IP\games /user:youruser YOUR_PASSWORD /persistent:yes
+
+2. Create local games folder:
+   mkdir D:\Games
+   (or edit the script to use a different path)
+
+3. Copy game-manager.ps1 somewhere permanent:
+   mkdir C:\Tools 2>$null
+   copy game-manager.ps1 C:\Tools\
+
+4. Edit game-manager.ps1:
+   - Change $ServerDrive if you used a different drive letter
+   - Change $LocalGamesDir if you put games elsewhere
+
+5. Run it:
+   powershell -ExecutionPolicy Bypass -File C:\Tools\game-manager.ps1 list
+
+USAGE
+=====
+
+  List all games:
+    .\game-manager.ps1 list
+
+  Pull a game from server to laptop:
+    .\game-manager.ps1 pull "Elden Ring"
+
+  Push a game back when done:
+    .\game-manager.ps1 push "Elden Ring"
+
+  Check disk space:
+    .\game-manager.ps1 space
+
+  Pull everything (warning: needs space!):
+    .\game-manager.ps1 pull-all
+
+  Push everything back:
+    .\game-manager.ps1 push-all
+
+
+STEAM INTEGRATION
+=================
+
+You can also add the network share as a Steam library:
+
+1. Open Steam
+2. Steam > Settings > Storage
+3. Click "+" to add a new library folder
+4. Select Z:\Games\steam (or wherever your Steam games are)
+5. When installing a game, choose which library to use
+
+For existing games:
+1. Pull the game to local first
+2. In Steam, it may appear as "Uninstalled"
+3. Click Install and point to the local folder
+4. Steam will "discover existing files" instead of re-downloading
+
+OR: Add Z:\Games\steam as a Steam library and try playing directly
+    (works for some games, not all — network latency can cause issues)
+
+
+SAVES & CLOUD
+=============
+
+IMPORTANT: Game saves are NOT in the game folder!
+
+  Steam saves: Steam Cloud (automatic)
+  Epic saves: Epic Cloud (automatic)
+  Pirated saves: You need to back these up manually!
+    Common locations:
+    - %USERPROFILE%\Documents\My Games
+    - %USERPROFILE%\AppData\Local
+    - %USERPROFILE%\AppData\Roaming
+    - The game folder itself (sometimes)
+
+  Tip: Before pushing a pirated game back to server,
+       copy its save folder to a separate "saves" folder on the server.
+
+
+TROUBLESHOOTING
+===============
+
+  "Server not accessible":
+    - Check if SMB share is mapped: net use
+    - Try: ping PROXMOX_IP
+    - Re-map: net use Z: /delete && net use Z: \\PROXMOX_IP\games /user:...
+
+  "Access denied":
+    - Check Samba user: sudo pdbedit -L
+    - Re-set password: sudo smbpasswd youruser
+    - Check folder permissions: ls -la /tank/games
+
+  "Game doesn't launch after pull":
+    - For Steam: right-click > Properties > Installed Files > Verify integrity
+    - For Epic: may need to re-login or re-verify
+    - For pirated: check if it needs redistributables installed
+
+  "Transfer is slow":
+    - Use wired connection, not WiFi
+    - Check server disk speed (HDD vs SSD)
+    - Robocopy is already optimized, but large files take time
+
+  "Steam doesn't detect pulled game":
+    - Close Steam completely
+    - Put game in the right Steam library folder
+    - Re-open Steam, it should detect it
+    - Or: Install > select same drive > "Discover existing files"
