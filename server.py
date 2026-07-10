@@ -693,13 +693,13 @@ class Handler(BaseHTTPRequestHandler):
             state = read_epic_state()
             if not state.get("app_name"):
                 self._json({"success": False, "error": "No Epic download selected"})
-            elif state.get("running") is not True:
-                self._json({"success": False, "error": "Auto-shutdown can only be changed while downloading"})
+            elif state.get("success") is True or state.get("status") == "completed":
+                self._json({"success": False, "error": "That Epic download is already complete"})
             else:
                 state["auto_shutdown"] = bool(body.get("enabled", False))
                 write_epic_state(state)
-                log_line(EPIC_LOG, f"=== {datetime.now():%Y-%m-%d %H:%M:%S} auto-shutdown {'enabled' if state['auto_shutdown'] else 'disabled'} ===")
-                self._json({"success": True, "auto_shutdown": state["auto_shutdown"]})
+                log_line(EPIC_LOG, f"=== {datetime.now():%Y-%m-%d %H:%M:%S} Epic auto-shutdown {'enabled' if state['auto_shutdown'] else 'disabled'} ===")
+                self._json({"success": True, "auto_shutdown": state["auto_shutdown"], "title": state.get("title"), "running": state.get("running"), "paused": state.get("paused")})
         elif p == "/api/delete-game":
             self._json(delete_game_folder(body.get("source", ""), body.get("name", "")))
         else:
@@ -708,6 +708,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"\n  🎮 GameVault running at http://{HOST}:{PORT}\n")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
 
 
 
