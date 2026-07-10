@@ -12,15 +12,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime
 
-HOST = "192.168.29.158"
-PORT = 8080
-GAME_ROOT = "/tank/games"
-LOG_FILE = "/root/gamemanager/transfer.log"
-HTML_FILE = "/root/gamemanager/index.html"
-LEGENDARY = "/root/.local/bin/legendary"
-EPIC_INSTALL_ROOT = "/tank/games/epic"
-EPIC_LOG = "/root/gamemanager/epic-install.log"
-EPIC_STATE = "/root/gamemanager/epic-state.json"
+BASE_DIR = os.environ.get("GAMEVAULT_HOME", os.path.dirname(os.path.abspath(__file__)))
+HOST = os.environ.get("GAMEVAULT_HOST", "127.0.0.1")
+PORT = int(os.environ.get("GAMEVAULT_PORT", "8080"))
+GAME_ROOT = os.environ.get("GAMEVAULT_GAME_ROOT", "/srv/gamevault/games")
+LOG_FILE = os.environ.get("GAMEVAULT_LOG_FILE", os.path.join(BASE_DIR, "transfer.log"))
+HTML_FILE = os.environ.get("GAMEVAULT_HTML_FILE", os.path.join(BASE_DIR, "index.html"))
+LEGENDARY = os.environ.get("GAMEVAULT_LEGENDARY", os.path.expanduser("~/.local/bin/legendary"))
+EPIC_INSTALL_ROOT = os.environ.get("GAMEVAULT_EPIC_ROOT", os.path.join(GAME_ROOT, "epic"))
+EPIC_LOG = os.environ.get("GAMEVAULT_EPIC_LOG", os.path.join(BASE_DIR, "epic-install.log"))
+EPIC_STATE = os.environ.get("GAMEVAULT_EPIC_STATE", os.path.join(BASE_DIR, "epic-state.json"))
+SMB_HOST = os.environ.get("GAMEVAULT_SMB_HOST", "server-ip")
+SMB_SHARE = os.environ.get("GAMEVAULT_SMB_SHARE", "games")
 SKIP_DIRS = {"steam", "epic", "pirated", "savedata", "setups", "gog"}
 
 def get_nics():
@@ -211,6 +214,17 @@ def scan_game_folder(folder_path, source_override=None):
         "source": source,
     }
 
+def get_display_ip():
+    if SMB_HOST and SMB_HOST != "server-ip":
+        return SMB_HOST
+    try:
+        for ip in os.popen("hostname -I").read().split():
+            if ip.startswith(("10.", "172.", "192.168.")):
+                return ip
+    except Exception:
+        pass
+    return HOST if HOST not in ("0.0.0.0", "127.0.0.1") else "server-ip"
+
 def get_system():
     total, used, free = shutil.disk_usage(GAME_ROOT)
     games = get_games()
@@ -221,10 +235,7 @@ def get_system():
             uptime = f"{int(secs//3600)}h {int((secs%3600)//60)}m"
     except:
         uptime = "?"
-    try:
-        ip = [l for l in os.popen("hostname -I").read().split() if l.startswith("192.")][0]
-    except:
-        ip = "?"
+    ip = get_display_ip()
     return {
         "total_gb": round(total / 1073741824, 1),
         "used_gb": round(used / 1073741824, 1),
@@ -546,8 +557,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "success": True,
                 "message": f"{name} ready on server share",
-                "smb_path": f"\\\\192.168.29.158\\games",
-                "instructions": f"Open File Explorer → {name} → copy to your laptop"
+                "smb_path": f"\\\\{get_display_ip()}\\{SMB_SHARE}",
+                "instructions": f"Open File Explorer → \\\\{get_display_ip()}\\{SMB_SHARE} → copy {name} to your laptop"
             })
         elif p == "/api/epic/auth":
             code = body.get("code", "").strip()
@@ -570,6 +581,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"\n  🎮 GameVault running at http://{HOST}:{PORT}\n")
     HTTPServer((HOST, PORT), Handler).serve_forever()
+
 
 
 

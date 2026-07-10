@@ -1,141 +1,189 @@
 # 🎮 GameVault
 
-A LAN-only game storage dashboard for a Proxmox/Linux server + Windows gaming laptop.
+GameVault is a LAN-only game storage dashboard for a Linux server and a Windows gaming laptop.
 
-GameVault stores big game folders on the server, exposes them over SMB as a Windows mapped drive, and provides a browser dashboard for browsing the server library, checking storage/network status, and downloading Epic library games directly to the server with Legendary.
+It helps you keep large game folders on a server, browse them in a web dashboard, access them from Windows through an SMB mapped drive, and optionally download Epic Games library files directly to the server using Legendary.
 
-## Current setup
+## Typical setup
 
-- Dashboard: `http://192.168.29.158:8080`
-- SMB share: `\\192.168.29.158\games`
-- Windows mapped drive target: `Z:`
-- Server storage root: `/tank/games`
-- LAN-only: dashboard binds to `192.168.29.158`, not internet-facing
+- Linux server: hosts storage, SMB share, and GameVault dashboard
+- Windows laptop/PC: maps the SMB share as a drive such as `Z:`
+- Browser dashboard: `http://<server-ip>:8080`
+- SMB share: `\\<server-ip>\games`
+- Default server game root: `/srv/gamevault/games`
+
+GameVault is designed for LAN use only. Do not expose it to the public internet.
 
 ## Features
 
-- Clean web dashboard with tabs:
-  - Server Library
-  - Epic Downloader
-  - System
-  - Activity
-- SMB share for Windows access.
-- Real disk/storage stats from the server.
-- Real network interface status.
-- Game scanning under:
-  - `/tank/games/steam/<game>`
-  - `/tank/games/epic/<game>`
-  - `/tank/games/pirated/<game>`
-- Utility folders shown separately:
-  - `/tank/games/savedata`
-  - `/tank/games/setups`
-- Epic direct downloader via Legendary CLI:
-  - Login with `authorizationCode`
-  - Load Epic library
-  - Install games to `/tank/games/epic`
-  - Pause/resume by stopping/restarting Legendary
-  - Real log tail from `epic-install.log`
-- Activity logs from real dashboard actions.
+- Web dashboard for Linux + Windows game storage workflows
+- Server Library tab for installed/stored game folders
+- Epic Downloader tab powered by Legendary CLI
+- Download Manager drawer with real log output and pause/resume controls
+- System tab for real storage and network status
+- Activity tab using real local logs
+- SMB-friendly folder layout:
+  - `steam/<game>`
+  - `epic/<game>`
+  - `pirated/<game>`
+  - `savedata/`
+  - `setups/`
+- Runtime configuration through environment variables
+- No internet exposure required
 
-## Important behavior
+## What GameVault does and does not do
 
-GameVault does **not** stream games or magically run server-side installs on Windows.
+GameVault does:
 
-The intended workflow is:
+1. Store game files on a Linux server.
+2. Expose them to Windows over SMB.
+3. Let you download Epic game files directly to the server.
+4. Help you copy games to/from the Windows laptop when needed.
 
-1. Download/install/store game files on the server.
-2. Copy the game folder to the Windows laptop using `Z:` when you want to play.
-3. Remove the laptop copy later to reclaim laptop storage.
+GameVault does not:
 
-For Epic games, the server uses Legendary to download game files into `/tank/games/epic`. You still run/play them on the Windows laptop after copying them locally.
+- Stream games.
+- Make Windows run games from Linux magically.
+- Bypass DRM or launcher requirements.
+- Guarantee every game can run directly from a network share.
 
-## Quick Windows setup
+Recommended workflow:
 
-Map the share:
+1. Store/download game files on the server.
+2. Copy a game to local Windows storage when you want to play.
+3. Remove the local copy later to reclaim laptop space.
+
+## Folder layout
+
+Default layout:
+
+```text
+/srv/gamevault/games/
+├── steam/
+├── epic/
+├── pirated/
+├── savedata/
+└── setups/
+```
+
+You can override this with `GAMEVAULT_GAME_ROOT`.
+
+## Configuration
+
+GameVault reads environment variables, so the repo can stay generic and private details stay local.
+
+Common variables:
+
+```bash
+GAMEVAULT_HOST=192.168.1.10
+GAMEVAULT_PORT=8080
+GAMEVAULT_GAME_ROOT=/srv/gamevault/games
+GAMEVAULT_SMB_HOST=192.168.1.10
+GAMEVAULT_SMB_SHARE=games
+GAMEVAULT_HTML_FILE=/opt/gamevault/index.html
+GAMEVAULT_LOG_FILE=/var/log/gamevault/transfer.log
+GAMEVAULT_EPIC_ROOT=/srv/gamevault/games/epic
+GAMEVAULT_EPIC_LOG=/var/log/gamevault/epic-install.log
+GAMEVAULT_EPIC_STATE=/var/lib/gamevault/epic-state.json
+GAMEVAULT_LEGENDARY=/root/.local/bin/legendary
+```
+
+Example systemd service:
+
+```ini
+[Unit]
+Description=GameVault Dashboard
+After=network.target smbd.service
+
+[Service]
+EnvironmentFile=/etc/gamevault.env
+WorkingDirectory=/opt/gamevault
+ExecStart=/usr/bin/python3 /opt/gamevault/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Windows setup
+
+Map the SMB share:
 
 ```powershell
-net use Z: \\192.168.29.158\games /user:gameshare <password>
+net use Z: \\<server-ip>\games /user:<samba-user> <password> /persistent:yes
 ```
 
-Open dashboard:
+Open the dashboard:
 
 ```text
-http://192.168.29.158:8080
+http://<server-ip>:8080
 ```
 
-## Server service
+## Epic downloader
 
-Dashboard service:
+GameVault uses Legendary CLI for Epic library downloads.
+
+Install Legendary on the Linux server:
 
 ```bash
-systemctl status gamevault
-systemctl restart gamevault
-```
-
-SMB services:
-
-```bash
-systemctl status smbd nmbd
-```
-
-## Files
-
-```text
-/root/gamemanager/
-├── server.py            # Current GameVault backend
-├── index.html           # Current dashboard UI
-├── dashboard.py         # Legacy dashboard prototype
-├── game-manager.ps1     # Windows PowerShell helper
-├── network_detect.py    # NIC detection helper
-├── setup_nic.sh         # Future gigabit NIC setup helper
-├── transfer.log         # Ignored runtime activity log
-├── epic-install.log     # Ignored Legendary install log
-├── epic-state.json      # Ignored runtime Epic downloader state
-├── SETUP-GUIDE.txt
-└── README.md
-```
-
-## Epic downloader notes
-
-Legendary is installed with pipx:
-
-```bash
-/root/.local/bin/legendary --version
+python3 -m pipx install legendary-gl
 ```
 
 Login flow:
 
 1. Open `https://legendary.gl/epiclogin`
-2. Login with Epic
-3. Copy `authorizationCode`
+2. Login with your Epic account
+3. Copy the `authorizationCode` value
 4. Paste it in the dashboard Epic Downloader tab
 
-Install target:
+Epic install target defaults to:
 
 ```text
-/tank/games/epic
+/srv/gamevault/games/epic
 ```
 
 Pause/resume behavior:
 
 - Pause stops the Legendary process group.
-- Resume runs the same install again.
-- Legendary reuses existing downloaded files and continues/repairs.
+- Resume starts Legendary again for the same app.
+- Legendary checks existing files and continues/repairs the download.
 
-## Security
+## Linux server setup summary
 
-- Dashboard is bound to the LAN IP: `192.168.29.158`.
-- SMB and dashboard are intended for LAN only.
-- Do not expose this dashboard to the internet.
+Install packages:
 
-## Hardware note
+```bash
+sudo apt update
+sudo apt install -y samba python3 pipx
+```
 
-The current server Ethernet NIC is a Realtek RTL810xE Fast Ethernet controller, limited to 100 Mbps. For much faster game transfers, use a USB 3.0 gigabit Ethernet adapter or PCIe gigabit NIC.
+Create folders:
 
-## Requirements
+```bash
+sudo mkdir -p /srv/gamevault/games/{steam,epic,pirated,savedata,setups}
+```
 
-- Linux/Proxmox server
-- Python 3.8+ (current server uses stdlib only)
-- Samba
-- pipx + Legendary for Epic downloads
-- Windows laptop with LAN access
+Create an SMB user and share, then map it from Windows.
+
+## Security notes
+
+- Bind the dashboard to a LAN IP, not a public interface.
+- Firewall ports 8080, 445, and 139 to LAN only.
+- Do not commit local env files, passwords, logs, or runtime state.
+
+## Repository files
+
+```text
+server.py           # GameVault backend
+index.html          # Dashboard UI
+game-manager.ps1   # Optional Windows copy helper
+network_detect.py   # Network interface detection helper
+setup_nic.sh        # Optional NIC upgrade helper
+SETUP-GUIDE.txt     # Linux + Windows setup walkthrough
+README.md
+```
+
+## License
+
+MIT

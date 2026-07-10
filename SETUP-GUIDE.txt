@@ -1,173 +1,188 @@
-GAME MANAGER — SETUP GUIDE
-============================
+GAMEVAULT SETUP GUIDE
+=====================
 
-WHAT YOU NEED
+This guide describes a generic Linux server + Windows gaming PC setup.
+
+OVERVIEW
+========
+
+- Linux server stores game folders.
+- Samba exposes the storage as an SMB share.
+- Windows maps the SMB share as a drive, usually Z:.
+- GameVault provides a LAN-only dashboard.
+
+EXAMPLE VALUES
+==============
+
+Replace these with your own values:
+
+- Server IP: <server-ip>
+- SMB share name: games
+- SMB user: <samba-user>
+- Game storage root: /srv/gamevault/games
+- Dashboard URL: http://<server-ip>:8080
+
+LINUX SERVER SETUP
+==================
+
+1. Install packages:
+
+   sudo apt update
+   sudo apt install -y samba python3 pipx
+
+2. Create the game storage directory:
+
+   sudo mkdir -p /srv/gamevault/games/{steam,epic,pirated,savedata,setups}
+   sudo chown -R <samba-user>:<samba-user> /srv/gamevault/games
+   sudo chmod -R 775 /srv/gamevault/games
+
+3. Create a Samba user:
+
+   sudo adduser --disabled-password --gecos "" <samba-user>
+   sudo smbpasswd -a <samba-user>
+
+4. Add an SMB share to /etc/samba/smb.conf:
+
+   [games]
+      comment = Game Library
+      path = /srv/gamevault/games
+      browseable = yes
+      writable = yes
+      guest ok = no
+      valid users = <samba-user>
+      force user = <samba-user>
+      create mask = 0664
+      directory mask = 0775
+
+5. Restart Samba:
+
+   sudo systemctl restart smbd nmbd
+   sudo systemctl enable smbd nmbd
+
+6. Test locally:
+
+   smbclient //localhost/games -U <samba-user>
+
+WINDOWS SETUP
 =============
-1. Proxmox server with SMB share
-2. Gaming laptop (Windows) with the share mapped
-3. This PowerShell script
 
-STEP-BY-STEP SETUP
-===================
+Map the SMB share:
 
---- ON PROXMOX SERVER ---
+   net use Z: \\<server-ip>\games /user:<samba-user> <password> /persistent:yes
 
-1. SSH into your Proxmox host (or a container/VM on it)
+Or use File Explorer:
 
-2. Install Samba:
-   apt update && apt install samba -y
+1. This PC > Map network drive
+2. Drive: Z:
+3. Folder: \\<server-ip>\games
+4. Check "Reconnect at sign-in"
+5. Enter Samba credentials
 
-3. Create game storage directory:
-   mkdir -p /tank/games
-   chmod 777 /tank/games
+GAME FOLDER LAYOUT
+==================
 
-4. Create Samba config:
-   cat >> /etc/samba/smb.conf << 'EOF'
+Use this layout on the SMB share:
 
-[games]
-   path = /tank/games
-   browseable = yes
-   writable = yes
-   guest ok = no
-   valid users = youruser
-   force user = youruser
-   create mask = 0644
-   directory mask = 0755
-EOF
+   Z:\steam\<game>
+   Z:\epic\<game>
+   Z:\pirated\<game>
+   Z:\savedata\
+   Z:\setups\
 
-5. Create a Samba user:
-   adduser --no-create-home --disabled-password --gecos "" youruser
-   smbpasswd -a youruser
-   (set a password you'll remember)
+GameVault scans steam, epic, and pirated as game source folders.
+Savedata and setups are utilities, not counted as games.
 
-6. Restart Samba:
-   systemctl restart smbd
-   systemctl enable smbd
-
-7. Test from Proxmox:
-   smbclient //localhost/games -U youruser
-   (should connect without errors)
-
-8. Organize your games on the server:
-   mkdir -p /tank/games/{steam,epic,pirated}
-   # Copy/move your game folders into the right place
-
---- ON WINDOWS LAPTOP ---
-
-1. Map the SMB share to a drive:
-   
-   Method A (Explorer):
-   - Open File Explorer
-   - Right-click "This PC" > "Map network drive"
-   - Drive: Z:
-   - Folder: \\PROXMOX_IP\games
-   - Check "Reconnect at sign-in"
-   - Enter credentials (youruser / password)
-   
-   Method B (PowerShell - run as Admin):
-   net use Z: \\PROXMOX_IP\games /user:youruser YOUR_PASSWORD /persistent:yes
-
-2. Create local games folder:
-   mkdir D:\Games
-   (or edit the script to use a different path)
-
-3. Copy game-manager.ps1 somewhere permanent:
-   mkdir C:\Tools 2>$null
-   copy game-manager.ps1 C:\Tools\
-
-4. Edit game-manager.ps1:
-   - Change $ServerDrive if you used a different drive letter
-   - Change $LocalGamesDir if you put games elsewhere
-
-5. Run it:
-   powershell -ExecutionPolicy Bypass -File C:\Tools\game-manager.ps1 list
-
-USAGE
-=====
-
-  List all games:
-    .\game-manager.ps1 list
-
-  Pull a game from server to laptop:
-    .\game-manager.ps1 pull "Elden Ring"
-
-  Push a game back when done:
-    .\game-manager.ps1 push "Elden Ring"
-
-  Check disk space:
-    .\game-manager.ps1 space
-
-  Pull everything (warning: needs space!):
-    .\game-manager.ps1 pull-all
-
-  Push everything back:
-    .\game-manager.ps1 push-all
-
-
-STEAM INTEGRATION
+GAMEVAULT SERVICE
 =================
 
-You can also add the network share as a Steam library:
+Recommended local env file: /etc/gamevault.env
 
-1. Open Steam
-2. Steam > Settings > Storage
-3. Click "+" to add a new library folder
-4. Select Z:\Games\steam (or wherever your Steam games are)
-5. When installing a game, choose which library to use
+   GAMEVAULT_HOST=<server-ip>
+   GAMEVAULT_PORT=8080
+   GAMEVAULT_GAME_ROOT=/srv/gamevault/games
+   GAMEVAULT_SMB_HOST=<server-ip>
+   GAMEVAULT_SMB_SHARE=games
+   GAMEVAULT_HOME=/opt/gamevault
+   GAMEVAULT_HTML_FILE=/opt/gamevault/index.html
+   GAMEVAULT_LOG_FILE=/var/log/gamevault/transfer.log
+   GAMEVAULT_EPIC_ROOT=/srv/gamevault/games/epic
+   GAMEVAULT_EPIC_LOG=/var/log/gamevault/epic-install.log
+   GAMEVAULT_EPIC_STATE=/var/lib/gamevault/epic-state.json
+   GAMEVAULT_LEGENDARY=/root/.local/bin/legendary
 
-For existing games:
-1. Pull the game to local first
-2. In Steam, it may appear as "Uninstalled"
-3. Click Install and point to the local folder
-4. Steam will "discover existing files" instead of re-downloading
+Example systemd service:
 
-OR: Add Z:\Games\steam as a Steam library and try playing directly
-    (works for some games, not all — network latency can cause issues)
+   [Unit]
+   Description=GameVault Dashboard
+   After=network.target smbd.service
 
+   [Service]
+   EnvironmentFile=/etc/gamevault.env
+   WorkingDirectory=/opt/gamevault
+   ExecStart=/usr/bin/python3 /opt/gamevault/server.py
+   Restart=always
+   RestartSec=5
 
-SAVES & CLOUD
-=============
+   [Install]
+   WantedBy=multi-user.target
 
-IMPORTANT: Game saves are NOT in the game folder!
+Start it:
 
-  Steam saves: Steam Cloud (automatic)
-  Epic saves: Epic Cloud (automatic)
-  Pirated saves: You need to back these up manually!
-    Common locations:
-    - %USERPROFILE%\Documents\My Games
-    - %USERPROFILE%\AppData\Local
-    - %USERPROFILE%\AppData\Roaming
-    - The game folder itself (sometimes)
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now gamevault
 
-  Tip: Before pushing a pirated game back to server,
-       copy its save folder to a separate "saves" folder on the server.
+EPIC DOWNLOADER
+===============
 
+Install Legendary:
+
+   python3 -m pipx install legendary-gl
+
+Login from the dashboard:
+
+1. Open https://legendary.gl/epiclogin
+2. Login with Epic
+3. Copy authorizationCode
+4. Paste in the dashboard
+
+Epic games download to the configured epic folder, usually:
+
+   /srv/gamevault/games/epic
 
 TROUBLESHOOTING
 ===============
 
-  "Server not accessible":
-    - Check if SMB share is mapped: net use
-    - Try: ping PROXMOX_IP
-    - Re-map: net use Z: /delete && net use Z: \\PROXMOX_IP\games /user:...
+SMB not accessible:
 
-  "Access denied":
-    - Check Samba user: sudo pdbedit -L
-    - Re-set password: sudo smbpasswd youruser
-    - Check folder permissions: ls -la /tank/games
+   net use
+   ping <server-ip>
+   net use Z: /delete
+   net use Z: \\<server-ip>\games /user:<samba-user> <password>
 
-  "Game doesn't launch after pull":
-    - For Steam: right-click > Properties > Installed Files > Verify integrity
-    - For Epic: may need to re-login or re-verify
-    - For pirated: check if it needs redistributables installed
+Access denied:
 
-  "Transfer is slow":
-    - Use wired connection, not WiFi
-    - Check server disk speed (HDD vs SSD)
-    - Robocopy is already optimized, but large files take time
+   sudo pdbedit -L
+   sudo smbpasswd <samba-user>
+   ls -la /srv/gamevault/games
 
-  "Steam doesn't detect pulled game":
-    - Close Steam completely
-    - Put game in the right Steam library folder
-    - Re-open Steam, it should detect it
-    - Or: Install > select same drive > "Discover existing files"
+Slow transfer:
+
+- Prefer wired Ethernet over WiFi.
+- Check NIC speed with ethtool.
+- Check router/switch port speed.
+- Use a gigabit adapter for large game libraries.
+
+Steam does not detect a copied game:
+
+1. Close Steam.
+2. Put the folder in the correct local Steam library folder.
+3. Reopen Steam.
+4. Start install to the same folder so Steam discovers existing files.
+
+SECURITY
+========
+
+- Keep GameVault LAN-only.
+- Bind dashboard to a LAN IP.
+- Firewall SMB and dashboard ports to LAN only.
+- Never commit passwords, local IPs, logs, runtime state, or private config.
