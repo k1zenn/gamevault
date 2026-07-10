@@ -8,7 +8,7 @@ import subprocess
 import re
 import shlex
 import signal
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -292,19 +292,24 @@ def run_legendary(args, timeout=60):
     except Exception as e:
         return {"ok": False, "code": 1, "stdout": "", "stderr": str(e)}
 
+def get_legendary_account_cached():
+    """Return Epic account name from Legendary local user.json without taking Legendary locks."""
+    user_path = os.path.expanduser("~/.config/legendary/user.json")
+    try:
+        with open(user_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("displayName") or data.get("account_id") or data.get("accountId") or "logged in"
+    except Exception:
+        return "not logged in"
+
+def has_legendary_credentials():
+    user_path = os.path.expanduser("~/.config/legendary/user.json")
+    return os.path.exists(user_path) and os.path.getsize(user_path) > 10
+
 def legendary_logged_in():
-    res = run_legendary(["status"], timeout=20)
-    text = (res.get("stdout", "") + res.get("stderr", ""))
-    return "Epic account: <not logged in>" not in text and "No saved credentials" not in text
+    return has_legendary_credentials()
 
 def get_epic_status():
-    res = run_legendary(["status"], timeout=20)
-    text = (res.get("stdout", "") + res.get("stderr", "")).strip()
-    account = "not logged in"
-    for line in text.splitlines():
-        if line.startswith("Epic account:"):
-            account = line.split(":", 1)[1].strip()
-            break
     state = {}
     if os.path.exists(EPIC_STATE):
         try:
@@ -312,7 +317,8 @@ def get_epic_status():
                 state = json.load(f)
         except Exception:
             state = {}
-    # Refresh process status so UI is live, not fake
+
+    # Refresh process status without calling Legendary (Legendary can lock/hang during downloads).
     if state.get("running") and state.get("pid"):
         try:
             os.kill(int(state["pid"]), 0)
@@ -326,6 +332,7 @@ def get_epic_status():
                 pass
         except PermissionError:
             pass
+
     tail = []
     if os.path.exists(EPIC_LOG):
         try:
@@ -333,8 +340,18 @@ def get_epic_status():
                 tail = [x.rstrip() for x in f.readlines()[-30:]]
         except Exception:
             pass
+
+    account = get_legendary_account_cached()
+    logged_in = account != "not logged in"
     progress = parse_epic_progress()
-    return {"logged_in": legendary_logged_in(), "account": account, "raw": text[-2000:], "install_state": state, "progress": progress, "log_tail": tail}
+    return {
+        "logged_in": logged_in,
+        "account": account,
+        "raw": "",
+        "install_state": state,
+        "progress": progress,
+        "log_tail": tail
+    }
 
 def get_epic_library():
     if not legendary_logged_in():
@@ -444,27 +461,70 @@ def stop_epic_install():
     pid = state.get("pid")
     if not pid:
         return {"success": False, "error": "No active Epic install"}
+
+    killed = []
+    errors = []
+    pgid = state.get("pgid")
     try:
-        pgid = state.get("pgid")
         if pgid:
             os.killpg(int(pgid), signal.SIGTERM)
+            killed.append(f"pgid:{pgid}:TERM")
         else:
             os.kill(int(pid), signal.SIGTERM)
-        state["running"] = False
-        state["paused"] = True
-        state["paused_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(EPIC_STATE, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        log_line(EPIC_LOG, f"=== {state['paused_at']} paused install: {state.get('title','unknown')} ===")
-        return {"success": True, "message": "Paused. Resume will continue from existing files."}
+            killed.append(f"pid:{pid}:TERM")
     except ProcessLookupError:
-        state["running"] = False
-        state["paused"] = True
-        with open(EPIC_STATE, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        return {"success": True, "message": "Process already stopped; marked paused."}
+        pass
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        errors.append(str(e))
+
+    # Give Legendary workers a moment to exit, then force if still alive.
+    import time
+    time.sleep(1.5)
+    try:
+        if pgid:
+            os.killpg(int(pgid), 0)
+            os.killpg(int(pgid), signal.SIGKILL)
+            killed.append(f"pgid:{pgid}:KILL")
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+
+    # Safety net: only kill real Legendary install worker processes for this app id.
+    # Do NOT use pgrep -f directly; it can match shell/curl/tool commands that mention the id.
+    app = state.get("app_name", "")
+    if app:
+        try:
+            out = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                pnum = int(parts[0])
+                cmdline = parts[1]
+                is_legendary = ("legendary install" in cmdline or "/.local/bin/legendary install" in cmdline)
+                if app in cmdline and is_legendary and pnum != os.getpid():
+                    try:
+                        os.kill(pnum, signal.SIGTERM)
+                        killed.append(f"pid:{pnum}:TERM")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    state["running"] = False
+    state["paused"] = True
+    state["paused_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["killed"] = killed
+    if errors:
+        state["pause_errors"] = errors
+    with open(EPIC_STATE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    log_line(EPIC_LOG, f"=== {state['paused_at']} paused install: {state.get('title','unknown')} ===")
+    return {"success": True, "message": "Paused. Resume will continue from existing files.", "killed": killed, "errors": errors}
 
 def resume_epic_install():
     state = {}
@@ -580,7 +640,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"\n  🎮 GameVault running at http://{HOST}:{PORT}\n")
-    HTTPServer((HOST, PORT), Handler).serve_forever()
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
+
 
 
 
