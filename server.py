@@ -8,6 +8,8 @@ import subprocess
 import re
 import shlex
 import signal
+import threading
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime
@@ -374,16 +376,70 @@ def get_epic_library():
     games.sort(key=lambda x: x["title"].lower())
     return {"success": True, "games": games}
 
-def start_epic_install(app_name, title=None):
+def write_epic_state(state):
+    os.makedirs(os.path.dirname(EPIC_STATE) or ".", exist_ok=True)
+    tmp = EPIC_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, EPIC_STATE)
+
+
+def read_epic_state():
+    try:
+        with open(EPIC_STATE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def request_server_shutdown():
+    """Power off only after a successful download and explicit user opt-in."""
+    log_line(EPIC_LOG, f"=== {datetime.now():%Y-%m-%d %H:%M:%S} download complete; shutdown requested ===")
+    # systemctl is preferred on Linux; fallback to shutdown for other Linux installs.
+    for cmd in (("systemctl", "poweroff"), ("shutdown", "-h", "now")):
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            continue
+
+
+def monitor_epic_install(process, state):
+    """Persist real completion state and perform optional post-success shutdown."""
+    rc = process.wait()
+    current = read_epic_state()
+    # Ignore a stale monitor after a newer install was started.
+    if current.get("pid") != process.pid:
+        return
+    current["running"] = False
+    current["returncode"] = rc
+    current["completed"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current["success"] = (rc == 0)
+    if rc == 0:
+        current["paused"] = False
+        current["status"] = "completed"
+    elif not current.get("paused"):
+        current["status"] = "failed"
+    write_epic_state(current)
+    log_line(EPIC_LOG, f"=== {current['completed']} install {'completed' if rc == 0 else 'failed'} (exit {rc}) ===")
+    if rc == 0 and current.get("auto_shutdown") is True:
+        # Small delay gives the state/log write time to reach disk and UI time to refresh.
+        time.sleep(3)
+        request_server_shutdown()
+
+
+def start_epic_install(app_name, title=None, auto_shutdown=False):
     if not legendary_logged_in():
         return {"success": False, "error": "Epic not logged in"}
     if not app_name:
         return {"success": False, "error": "Missing app_name"}
+    existing = read_epic_state()
+    if existing.get("running"):
+        return {"success": False, "error": "Another Epic download is already running"}
     os.makedirs(EPIC_INSTALL_ROOT, exist_ok=True)
     safe_title = title or app_name
-    state = {"running": True, "app_name": app_name, "title": safe_title, "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    with open(EPIC_STATE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
+    state = {"running": True, "paused": False, "status": "downloading", "app_name": app_name, "title": safe_title, "auto_shutdown": bool(auto_shutdown), "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    write_epic_state(state)
     log_line(EPIC_LOG, f"=== {state['started']} starting Epic install: {safe_title} ({app_name}) ===")
     # Legendary asks for confirmation on installs. In web mode there is no stdin,
     # so auto-confirm with `yes` and skip optional prompts. Run in its own process
@@ -397,9 +453,9 @@ def start_epic_install(app_name, title=None):
     state["pid"] = p.pid
     state["pgid"] = os.getpgid(p.pid)
     state["command"] = shell_cmd
-    with open(EPIC_STATE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    return {"success": True, "pid": p.pid, "install_root": EPIC_INSTALL_ROOT, "message": f"Started downloading {safe_title} to {EPIC_INSTALL_ROOT}"}
+    write_epic_state(state)
+    threading.Thread(target=monitor_epic_install, args=(p, state.copy()), daemon=True).start()
+    return {"success": True, "pid": p.pid, "install_root": EPIC_INSTALL_ROOT, "auto_shutdown": bool(auto_shutdown), "message": f"Started downloading {safe_title} to {EPIC_INSTALL_ROOT}"}
 
 def parse_epic_progress():
     """Parse real Legendary log output for percent/speed/eta from latest run only."""
@@ -538,7 +594,7 @@ def resume_epic_install():
     title = state.get("title") or app
     if not app:
         return {"success": False, "error": "No paused Epic install found"}
-    return start_epic_install(app, title)
+    return start_epic_install(app, title, bool(state.get("auto_shutdown", False)))
 
 def delete_game_folder(source, name):
     if source not in ("steam", "epic", "pirated", "gog", "custom"):
@@ -628,11 +684,22 @@ class Handler(BaseHTTPRequestHandler):
                 res = run_legendary(["auth", "--code", code], timeout=60)
                 self._json({"success": res["ok"], "stdout": res["stdout"], "stderr": res["stderr"]})
         elif p == "/api/epic/install":
-            self._json(start_epic_install(body.get("app_name", ""), body.get("title", "")))
+            self._json(start_epic_install(body.get("app_name", ""), body.get("title", ""), bool(body.get("auto_shutdown", False))))
         elif p == "/api/epic/pause":
             self._json(stop_epic_install())
         elif p == "/api/epic/resume":
             self._json(resume_epic_install())
+        elif p == "/api/epic/auto-shutdown":
+            state = read_epic_state()
+            if not state.get("app_name"):
+                self._json({"success": False, "error": "No Epic download selected"})
+            elif state.get("running") is not True:
+                self._json({"success": False, "error": "Auto-shutdown can only be changed while downloading"})
+            else:
+                state["auto_shutdown"] = bool(body.get("enabled", False))
+                write_epic_state(state)
+                log_line(EPIC_LOG, f"=== {datetime.now():%Y-%m-%d %H:%M:%S} auto-shutdown {'enabled' if state['auto_shutdown'] else 'disabled'} ===")
+                self._json({"success": True, "auto_shutdown": state["auto_shutdown"]})
         elif p == "/api/delete-game":
             self._json(delete_game_folder(body.get("source", ""), body.get("name", "")))
         else:
@@ -641,6 +708,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"\n  🎮 GameVault running at http://{HOST}:{PORT}\n")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
 
 
 
