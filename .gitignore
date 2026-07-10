@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.log
 *.pid
+epic-state.json
 .env
 .venv/
 venv/

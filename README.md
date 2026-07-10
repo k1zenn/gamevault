@@ -1,101 +1,141 @@
 # 🎮 GameVault
 
-A self-hosted game storage manager for managing your game library across a Proxmox server and gaming laptop.
+A LAN-only game storage dashboard for a Proxmox/Linux server + Windows gaming laptop.
 
-Store games on your server, pull them to your laptop when you want to play, push them back when you're done. Works with Steam, Epic, and pirated games.
+GameVault stores big game folders on the server, exposes them over SMB as a Windows mapped drive, and provides a browser dashboard for browsing the server library, checking storage/network status, and downloading Epic library games directly to the server with Legendary.
+
+## Current setup
+
+- Dashboard: `http://192.168.29.158:8080`
+- SMB share: `\\192.168.29.158\games`
+- Windows mapped drive target: `Z:`
+- Server storage root: `/tank/games`
+- LAN-only: dashboard binds to `192.168.29.158`, not internet-facing
 
 ## Features
 
-- **Web Dashboard** — Beautiful dark-themed UI to browse and manage your games
-- **SMB File Sharing** — Access your game library as a network drive from Windows
-- **Game Manager CLI** — PowerShell script for quick pull/push operations from Windows
-- **Firewall Security** — LAN-only access, nothing exposed to the internet
-- **Auto-start** — Dashboard and SMB share start automatically on boot
-- **Transfer Logging** — Track all game movements with timestamps
+- Clean web dashboard with tabs:
+  - Server Library
+  - Epic Downloader
+  - System
+  - Activity
+- SMB share for Windows access.
+- Real disk/storage stats from the server.
+- Real network interface status.
+- Game scanning under:
+  - `/tank/games/steam/<game>`
+  - `/tank/games/epic/<game>`
+  - `/tank/games/pirated/<game>`
+- Utility folders shown separately:
+  - `/tank/games/savedata`
+  - `/tank/games/setups`
+- Epic direct downloader via Legendary CLI:
+  - Login with `authorizationCode`
+  - Load Epic library
+  - Install games to `/tank/games/epic`
+  - Pause/resume by stopping/restarting Legendary
+  - Real log tail from `epic-install.log`
+- Activity logs from real dashboard actions.
 
-## Quick Start
+## Important behavior
 
-### Server Setup (Proxmox)
+GameVault does **not** stream games or magically run server-side installs on Windows.
 
-1. Install and configure Samba:
-```bash
-apt install samba -y
-mkdir -p /tank/games/{steam,epic,pirated}
+The intended workflow is:
+
+1. Download/install/store game files on the server.
+2. Copy the game folder to the Windows laptop using `Z:` when you want to play.
+3. Remove the laptop copy later to reclaim laptop storage.
+
+For Epic games, the server uses Legendary to download game files into `/tank/games/epic`. You still run/play them on the Windows laptop after copying them locally.
+
+## Quick Windows setup
+
+Map the share:
+
+```powershell
+net use Z: \\192.168.29.158\games /user:gameshare <password>
 ```
 
-2. Configure `/etc/samba/smb.conf` — add:
-```ini
-[games]
-   path = /tank/games
-   browseable = yes
-   writable = yes
-   valid users = gameshare
-```
+Open dashboard:
 
-3. Create user and start services:
-```bash
-useradd -r -s /usr/sbin/nologin gameshare
-smbpasswd -a gameshare
-systemctl enable --now smbd nmbd
-```
-
-4. Start the dashboard:
-```bash
-systemctl enable --now gamevault
-```
-
-### Windows Laptop Setup
-
-1. Map the network drive:
-   - Open File Explorer > This PC > Map network drive
-   - Drive: `Z:`
-   - Folder: `\\192.168.29.158\games`
-   - Username: `gameshare`
-
-2. Open dashboard in browser:
-```
+```text
 http://192.168.29.158:8080
 ```
 
-3. Use the PowerShell game manager:
-```powershell
-.\game-manager.ps1 list              # See all games
-.\game-manager.ps1 pull "Elden Ring"  # Copy to laptop
-.\game-manager.ps1 push "Elden Ring"  # Copy back to server
+## Server service
+
+Dashboard service:
+
+```bash
+systemctl status gamevault
+systemctl restart gamevault
 ```
 
-## Project Structure
+SMB services:
 
+```bash
+systemctl status smbd nmbd
 ```
-gamemanager/
-├── dashboard.py          # Web dashboard server (Python)
-├── game-manager.ps1      # Windows PowerShell CLI
-├── transfer.log          # Transfer history
-├── SETUP-GUIDE.txt       # Detailed setup instructions
-├── gamevault.service     # Systemd service file
+
+## Files
+
+```text
+/root/gamemanager/
+├── server.py            # Current GameVault backend
+├── index.html           # Current dashboard UI
+├── dashboard.py         # Legacy dashboard prototype
+├── game-manager.ps1     # Windows PowerShell helper
+├── network_detect.py    # NIC detection helper
+├── setup_nic.sh         # Future gigabit NIC setup helper
+├── transfer.log         # Ignored runtime activity log
+├── epic-install.log     # Ignored Legendary install log
+├── epic-state.json      # Ignored runtime Epic downloader state
+├── SETUP-GUIDE.txt
 └── README.md
 ```
 
-## Configuration
+## Epic downloader notes
 
-Edit `dashboard.py` to change:
-- `HOST` — Bind address (default: LAN IP only)
-- `PORT` — Dashboard port (default: 8080)
-- `GAME_DIRS` — Game storage paths
+Legendary is installed with pipx:
+
+```bash
+/root/.local/bin/legendary --version
+```
+
+Login flow:
+
+1. Open `https://legendary.gl/epiclogin`
+2. Login with Epic
+3. Copy `authorizationCode`
+4. Paste it in the dashboard Epic Downloader tab
+
+Install target:
+
+```text
+/tank/games/epic
+```
+
+Pause/resume behavior:
+
+- Pause stops the Legendary process group.
+- Resume runs the same install again.
+- Legendary reuses existing downloaded files and continues/repairs.
 
 ## Security
 
-The dashboard and SMB share are configured for **LAN-only access**:
-- Dashboard bound to LAN IP (not 0.0.0.0)
-- Firewall rules block external access to ports 8080, 139, 445
-- Rules persist across reboots via iptables
+- Dashboard is bound to the LAN IP: `192.168.29.158`.
+- SMB and dashboard are intended for LAN only.
+- Do not expose this dashboard to the internet.
 
-## System Requirements
+## Hardware note
 
-- Proxmox server (or any Linux server) with Python 3.8+
-- Samba installed and configured
-- Windows laptop with network access to server
+The current server Ethernet NIC is a Realtek RTL810xE Fast Ethernet controller, limited to 100 Mbps. For much faster game transfers, use a USB 3.0 gigabit Ethernet adapter or PCIe gigabit NIC.
 
-## License
+## Requirements
 
-MIT
+- Linux/Proxmox server
+- Python 3.8+ (current server uses stdlib only)
+- Samba
+- pipx + Legendary for Epic downloads
+- Windows laptop with LAN access
